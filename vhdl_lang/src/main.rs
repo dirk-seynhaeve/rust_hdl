@@ -126,11 +126,7 @@ fn parse_and_analyze_project(
 
     let mut config = Config::default();
     let mut msg_printer = MessagePrinter::default();
-    config.load_external_config_with_user_config(
-        &mut msg_printer,
-        libraries.cloned(),
-        user_config,
-    );
+    config.load_external_config_with_user_config(&mut msg_printer, libraries.cloned(), user_config);
     config.append(
         &Config::read_file_path(Path::new(&config_path)).expect("Failed to read config file"),
         &mut msg_printer,
