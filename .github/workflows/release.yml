@@ -1,0 +1,136 @@
+# Release workflow for the HDL Project Builder fork of rust_hdl.
+#
+# Pushing a tag named hpb-v<upstream version>-<n> (for example hpb-v0.88.0-1) builds vhdl_ls and
+# vhdl_lang for the three targets HDL Project Builder bundles, runs the tests, and publishes a GitHub
+# release whose assets carry the SAME NAMES AND LAYOUT as upstream's own releases:
+#
+#   vhdl_ls-x86_64-pc-windows-msvc.zip     vhdl_lang-x86_64-pc-windows-msvc.zip
+#   vhdl_ls-x86_64-unknown-linux-musl.zip  vhdl_lang-x86_64-unknown-linux-musl.zip
+#   vhdl_ls-aarch64-apple-darwin.zip       vhdl_lang-aarch64-apple-darwin.zip
+#
+# Each zip holds <crate>-<target>/bin/<crate>[.exe], <crate>-<target>/vhdl_libraries/ and
+# <crate>-<target>/LICENSE.txt, so a consumer of upstream releases can switch to this fork by
+# changing only the repository and the tag.
+#
+# The tag prefix is hpb-v, not v, on purpose: upstream's build-test-all.yml releases on any tag
+# starting with v and checks that the tag equals the crate version, which a fork tag cannot.
+
+name: Release (HPB fork)
+
+on:
+  push:
+    tags: [ 'hpb-v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        crate: [ vhdl_lang, vhdl_ls ]
+        target: [ x86_64-pc-windows-msvc, x86_64-unknown-linux-musl, aarch64-apple-darwin ]
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: .exe
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --manifest-path ${{ matrix.crate }}/Cargo.toml --release --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --manifest-path ${{ matrix.crate }}/Cargo.toml --release --target ${{ matrix.target }}
+
+      - name: Check the option is present
+        shell: bash
+        run: |
+          target/${{ matrix.target }}/release/${{ matrix.crate }}${{ matrix.ext }} --help | grep -- '--no-user-config'
+
+      - name: Assemble
+        shell: bash
+        run: |
+          dir=${{ matrix.crate }}-${{ matrix.target }}
+          mkdir -p $dir/bin
+          cp -R vhdl_libraries $dir
+          cp LICENSE.txt $dir
+          cp target/${{ matrix.target }}/release/${{ matrix.crate }}${{ matrix.ext }} $dir/bin
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ${{ matrix.crate }}-${{ matrix.target }}
+          path: ${{ matrix.crate }}-${{ matrix.target }}
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/hpb-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          pattern: vhdl_*
+          path: dist
+
+      - name: Check the version matches the tag
+        shell: bash
+        run: |
+          tag=${GITHUB_REF#refs/tags/hpb-v}
+          upstream=${tag%-*}
+          for crate in vhdl_lang vhdl_ls; do
+            exe=dist/$crate-x86_64-unknown-linux-musl/bin/$crate
+            chmod +x $exe
+            got=$($exe --version)
+            if [ "$got" != "$crate $upstream" ]; then
+              echo "Version mismatch: '$got' is not '$crate $upstream'"
+              exit 1
+            fi
+          done
+
+      - name: Zip
+        shell: bash
+        run: |
+          cd dist
+          chmod +x */bin/vhdl*
+          for d in vhdl_*; do zip -qr "$d.zip" "$d"; done
+          sha256sum *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          gh release create "$tag" dist/*.zip dist/SHA256SUMS LICENSE.txt \
+            --title "$tag" \
+            --notes "rust_hdl ${tag#hpb-v} with --no-user-config, built for HDL Project Builder. Source: this tag."
